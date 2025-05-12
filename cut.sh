@@ -2,9 +2,9 @@
 
 # Function to display script usage
 usage() {
-    echo "Usage: $0 -i <input_video> -da <start_durations> -di <end_durations> [-o <output_base>]"
+    echo "Usage: $0 -i <input_video> -da <start_duration> -di <end_duration> [-o <output_file>]"
     echo "Format: Durations in MM:SS or HH:MM:SS (e.g., '01:30' or '00:01:30')"
-    echo "Example: $0 -i video.mp4 -da '00:00 02:30' -di '00:00:30 00:03:00' -o scene"
+    echo "Example: $0 -i video.mp4 -da 00:00 -di 00:30 -o output.mp4"
     exit 1
 }
 
@@ -12,7 +12,6 @@ usage() {
 validate_and_convert_duration() {
     local duration=$1
     local arg_name=$2
-    local index=$3
 
     # Validate MM:SS or HH:MM:SS format
     if [[ $duration =~ ^([0-9]{2}):([0-5][0-9])$ ]]; then
@@ -24,11 +23,11 @@ validate_and_convert_duration() {
         if (( hours >= 0 && hours <= 99 )); then
             echo "${duration}"
         else
-            echo "Error: Invalid hours in $arg_name index $index (must be 00-99): $duration" >&2
+            echo "Error: Invalid hours in $arg_name (must be 00-99): $duration" >&2
             exit 1
         fi
     else
-        echo "Error: Invalid duration format in $arg_name index $index. Must be MM:SS or HH:MM:SS, found: $duration" >&2
+        echo "Error: Invalid duration format in $arg_name. Must be MM:SS or HH:MM:SS, found: $duration" >&2
         exit 1
     fi
 }
@@ -48,16 +47,16 @@ fi
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -i) input_video="$2"; shift ;;
-        -da) IFS=' ' read -r -a start_durations <<< "$2"; shift ;;
-        -di) IFS=' ' read -r -a end_durations <<< "$2"; shift ;;
-        -o) output_base="$2"; shift ;;
+        -da) start_duration="$2"; shift ;;
+        -di) end_duration="$2"; shift ;;
+        -o) output_file="$2"; shift ;;
         *) echo "Unknown argument: $1" >&2; usage ;;
     esac
     shift
 done
 
 # Validate inputs
-if [ -z "$input_video" ] || [ ${#start_durations[@]} -eq 0 ] || [ ${#end_durations[@]} -eq 0 ]; then
+if [ -z "$input_video" ] || [ -z "$start_duration" ] || [ -z "$end_duration" ]; then
     echo "Error: Arguments -i, -da, and -di are required." >&2
     usage
 fi
@@ -68,47 +67,35 @@ if [ ! -f "$input_video" ]; then
     exit 1
 fi
 
-# Check if start and end durations match in count
-if [ ${#start_durations[@]} -ne ${#end_durations[@]} ]; then
-    echo "Error: Number of start (-da) and end (-di) durations must match." >&2
+# Set default output file if -o is not provided
+output_file=${output_file:-"output.mp4"}
+
+# Validate and convert durations
+start_converted=$(validate_and_convert_duration "$start_duration" "-da")
+end_converted=$(validate_and_convert_duration "$end_duration" "-di")
+
+# Convert durations to seconds for time order check
+start_sec=$(echo "$start_converted" | awk -F: '{print ($1*3600)+($2*60)+$3}')
+end_sec=$(echo "$end_converted" | awk -F: '{print ($1*3600)+($2*60)+$3}')
+
+if [ "$start_sec" -ge "$end_sec" ]; then
+    echo "Error: Start duration ($start_duration) must be less than end duration ($end_duration)." >&2
     exit 1
 fi
 
-# Set default output base if -o is not provided
-output_base=${output_base:-"output_scene"}
+# Ensure output file has .mp4 extension
+if [[ ! "$output_file" =~ \.mp4$ ]]; then
+    output_file="${output_file}.mp4"
+fi
 
-# Validate and convert durations, check time order
-start_durations_converted=()
-end_durations_converted=()
-for i in "${!start_durations[@]}"; do
-    start_durations_converted+=("$(validate_and_convert_duration "${start_durations[i]}" "-da" "$((i+1))")")
-    end_durations_converted+=("$(validate_and_convert_duration "${end_durations[i]}" "-di" "$((i+1))")")
+# Cut the video
+echo "Cutting video from $start_duration to $end_duration..."
 
-    # Convert durations to seconds for time order check
-    start_sec=$(echo "${start_durations_converted[i]}" | awk -F: '{print ($1*3600)+($2*60)+$3}')
-    end_sec=$(echo "${end_durations_converted[i]}" | awk -F: '{print ($1*3600)+($2*60)+$3}')
+if ffmpeg -i "$input_video" -ss "$start_converted" -to "$end_converted" -c:v copy -c:a copy "$output_file" -y -loglevel error >/dev/null 2>&1; then
+    echo "Video successfully saved as $output_file"
+else
+    echo "Error: Failed to cut video. Check input or durations." >&2
+    exit 1
+fi
 
-    if [ "$start_sec" -ge "$end_sec" ]; then
-        echo "Error: Start duration (${start_durations[i]}) must be less than end duration (${end_durations[i]}) at index $((i+1))." >&2
-        exit 1
-    fi
-done
-
-# Loop to cut video into scenes
-for ((i=0; i<${#start_durations_converted[@]}; i++)); do
-    start=${start_durations_converted[i]}
-    end=${end_durations_converted[i]}
-    output="${output_base}_$((i+1)).mp4"
-
-    echo "Cutting scene $((i+1)): from ${start_durations[i]} to ${end_durations[i]}..."
-
-    # Run ffmpeg with minimal logging
-    if ffmpeg -i "$input_video" -ss "$start" -to "$end" -c:v copy -c:a copy "$output" -y -loglevel error >/dev/null 2>&1; then
-        echo "Scene $((i+1)) successfully saved as $output"
-    else
-        echo "Error: Failed to cut scene $((i+1)). Check input or durations." >&2
-        exit 1
-    fi
-done
-
-echo "Finished cutting all scenes!"
+echo "Finished!"
